@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "can.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -199,16 +198,13 @@ static int frame_bytes(struct remote *b)
 {
 	char *p = b->buf;
 	char *e = b->buf + b->sz;
-	for (;;) {
-		if (p + 16 > e) {
+	while (p + 2 <= e) {
+		uint16_t len;
+		memcpy(&len, p, 2);
+		if (p + 2 + len > e) {
 			break;
 		}
-		struct can_frame *f = (struct can_frame *)p;
-		int flen = (f->can_dlc > 8) ? 64 : 8;
-		if (p + 8 + flen > e) {
-			break;
-		}
-		p += 8 + flen;
+		p += 2 + len;
 	}
 	return p - b->buf;
 }

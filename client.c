@@ -121,14 +121,15 @@ int main(int argc, char *argv[])
 		return 2;
 	}
 
-	struct can_frame f;
-	memset(&f, 0, sizeof(f));
-	f.can_id = CAN_EFF_FLAG | 0x1800FFEC;
-	f.can_dlc = 4;
+	struct canfd_frame f;
+	f.can_id = CAN_EFF_FLAG | 0x18EEFFEC;
+	f.len = 4;
 	f.data[0] = 1;
 	f.data[1] = 2;
 	f.data[2] = 3;
 	f.data[3] = 4;
+	uint16_t len = sizeof(f);
+	send(fd, (char *)&len, 2, 0);
 	send(fd, (char *)&f, sizeof(f), 0);
 
 	char buf[1024];
@@ -154,19 +155,19 @@ int main(int argc, char *argv[])
 		}
 		have += sz;
 
-		for (;;) {
+		while (off + 2 <= have) {
+			uint16_t len;
+			memcpy(&len, buf + off, 2);
+			if (off + 2 + len > have) {
+				break;
+			}
+			char *data = buf + off + 2;
+			off += 2 + len;
 			struct canfd_frame f;
-			if (off + 8 > have) {
-				break;
+			if (len > sizeof(f)) {
+				continue;
 			}
-			memcpy(&f, buf + off, 8);
-			int flen = (f.len > 8) ? CANFD_MAX_DLEN : CAN_MAX_DLEN;
-			if (off + 8 + flen > have) {
-				break;
-			}
-			memcpy(f.data, buf + off + 8, flen);
-			off += 8 + flen;
-
+			memcpy(&f, data, len);
 			fprintf(stderr, "RX 0x%08X", f.can_id);
 			for (int i = 0; i < f.len; i++) {
 				fprintf(stderr, " %02X", f.data[i]);
