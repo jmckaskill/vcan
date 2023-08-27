@@ -1,12 +1,16 @@
 #define _POSIX_C_SOURCE 200809L
+
 #include "can.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 #ifdef _WIN32
+#include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
+#pragma comment(lib, "ws2_32.lib")
 static inline void perror(const char *msg)
 {
 	char buf[256];
@@ -84,10 +88,10 @@ static int bind_tcp(fd_t *pfd, const char *host, const char *port)
 
 	for (ai = res; ai != NULL; ai = ai->ai_next) {
 #ifdef _WIN32
-		fd_t fd = (HANDLE)WSASocket(ai->ai_family, ai->ai_socktype,
-					    ai->ai_protocol, NULL, 0,
-					    WSA_FLAG_OVERLAPPED);
-		if (fd == INVALID_HANDLE_VALUE) {
+		fd_t fd = WSASocket(ai->ai_family, ai->ai_socktype,
+				    ai->ai_protocol, NULL, 0,
+				    WSA_FLAG_OVERLAPPED);
+		if (fd == INVALID_SOCKET) {
 			continue;
 		}
 #else
@@ -142,6 +146,16 @@ static struct remote *new_remote(fd_t fd)
 	struct remote *r = malloc(sizeof(*r));
 	r->fd = fd;
 	r->sz = 0;
+	r->next = NULL;
+	r->prev = NULL;
+#ifdef _WIN32
+	memset(&r->ol, 0, sizeof(r->ol));
+#endif
+	return r;
+}
+
+static void add_remote(struct remote *r)
+{
 	if (remotes) {
 		r->next = remotes;
 		r->prev = remotes->prev;
@@ -152,7 +166,6 @@ static struct remote *new_remote(fd_t fd)
 		r->next = r;
 		r->prev = r;
 	}
-	return r;
 }
 
 static void close_remote(struct remote *r)
@@ -166,10 +179,8 @@ static void close_remote(struct remote *r)
 			remotes = r->next;
 		}
 	}
-	r->next = free_list;
 	r->prev = NULL;
-	closesocket(r->fd);
-	r->fd = INVALID_SOCKET;
+	r->next = free_list;
 	free_list = r;
 }
 
@@ -177,6 +188,7 @@ static void free_remotes(void)
 {
 	for (struct remote *r = free_list; r != NULL;) {
 		struct remote *n = r->next;
+		closesocket(r->fd);
 		free(r);
 		r = n;
 	}
@@ -228,16 +240,17 @@ static void distribute_data(struct remote *r)
 
 static int nonblock_send(struct remote *t, char *buf, int n)
 {
-	OVERLAPPED ol;
 	DWORD written;
-	return !WriteFile(t->fd, r->buf, n, &written, &ol) || written != n;
+	OVERLAPPED ol;
+	memset(&ol, 0, sizeof(ol));
+	return !WriteFile((HANDLE)t->fd, buf, n, &written, &ol) || written != n;
 }
 
-static void read_more(struct rxbuf *r)
+static void read_more(struct remote *r)
 {
 	DWORD read;
-	while (ReadFile(r->fd, r->buf + r->sz, sizeof(r->buf) - r->sz, &read,
-			&r->ol)) {
+	while (ReadFile((HANDLE)r->fd, r->buf + r->sz, sizeof(r->buf) - r->sz,
+			&read, &r->ol)) {
 		r->sz += read;
 		distribute_data(r);
 	}
@@ -247,25 +260,35 @@ static void read_more(struct rxbuf *r)
 	}
 }
 
-static SOCKET accept_more(HANDLE iocp, LPFN_ACCEPTEX acceptex, SOCKET lfd)
+static struct remote *accept_more(HANDLE iocp, LPFN_ACCEPTEX acceptex,
+				  SOCKET lfd)
 {
-	static OVERLAPPED ol;
-	static char acceptbuf[32 + 2 * sizeof(struct sockaddr_in6)];
 	for (;;) {
 		SOCKET cfd = WSASocket(AF_INET6, SOCK_STREAM, IPPROTO_TCP, NULL,
 				       0, WSA_FLAG_OVERLAPPED);
+
+		struct remote *r = new_remote(cfd);
+		if (CreateIoCompletionPort((HANDLE)cfd, iocp, (ULONG_PTR)r,
+					   0) == NULL) {
+			perror("add to iocp");
+		}
+		if (!SetFileCompletionNotificationModes(
+			    (HANDLE)cfd,
+			    FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)) {
+			perror("set skip on success");
+		}
+
 		DWORD addrsz;
-		BOOL ret = acceptex(lfd, cfd, acceptbuf, 0,
+		BOOL ret = acceptex(lfd, cfd, r->buf, 0,
 				    16 + sizeof(struct sockaddr_in6),
 				    16 + sizeof(struct sockaddr_in6), &addrsz,
-				    &ol);
+				    &r->ol);
 		if (ret) {
-			struct rxbuf *r = new_remote(cfd);
-			CreateIoCompletionPort(cfd, iocp, r, 0);
+			add_remote(r);
 			read_more(r);
 			continue;
 		} else if (WSAGetLastError() == WSA_IO_PENDING) {
-			return cfd;
+			return r;
 		} else {
 			perror("acceptex");
 			exit(1);
@@ -275,15 +298,16 @@ static SOCKET accept_more(HANDLE iocp, LPFN_ACCEPTEX acceptex, SOCKET lfd)
 
 int main(int argc, char *argv[])
 {
-	WSAStartup();
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
 
 	SOCKET fd;
 	if (do_bind(&fd, argc, argv)) {
-		fputs("usage ./vcand host tcp-port\n" stderr);
+		fputs("usage ./vcand host tcp-port\n", stderr);
 		return 2;
 	}
 
-	HANDLE iocp = CreateIoCompletionPort(fd, NULL, NULL, 1);
+	HANDLE iocp = CreateIoCompletionPort((HANDLE)fd, NULL, 0, 1);
 	if (iocp == INVALID_HANDLE_VALUE) {
 		perror("CreateIoCompletionPort");
 		return 1;
@@ -292,7 +316,7 @@ int main(int argc, char *argv[])
 	DWORD dwBytes;
 	GUID GuidAcceptEx = WSAID_ACCEPTEX;
 	LPFN_ACCEPTEX lpfnAcceptEx;
-	int res = WSAIoctl(ListenSocket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+	int res = WSAIoctl(fd, SIO_GET_EXTENSION_FUNCTION_POINTER,
 			   &GuidAcceptEx, sizeof(GuidAcceptEx), &lpfnAcceptEx,
 			   sizeof(lpfnAcceptEx), &dwBytes, NULL, NULL);
 	if (res == SOCKET_ERROR) {
@@ -300,31 +324,33 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	SOCKET cfd = accept_more(iocp, lpfnAcceptEx, fd);
+	struct remote *next = accept_more(iocp, lpfnAcceptEx, fd);
 
-	DWORD rcvd;
-	struct rxbuf *r;
-	OVERLAPPED *ol;
-	while (GetQueuedCompletionStatus(iocp, &rcvd, (PULONG_PTR)&r, &pol,
-					 INFINITE)) {
-		if (!r) {
-			struct rxbuf *r = new_remote(cfd);
-			CreateIoCompletionPort(cfd, iocp, r, 0);
-			read_more(r);
-			cfd = accept_more(&head, iocp, lpfnAcceptEx, fd);
-		} else {
-			r->sz += rcvd;
-			distribute_data(r);
-			read_more(r);
+	OVERLAPPED_ENTRY ev[16];
+	DWORD num;
+	while (GetQueuedCompletionStatusEx(iocp, ev, sizeof(ev) / sizeof(ev[0]),
+					   &num, INFINITE, TRUE)) {
+		for (int i = 0; i < num; i++) {
+			struct remote *r = (void *)ev[i].lpCompletionKey;
+			if (!r) {
+				add_remote(next);
+				read_more(next);
+				next = accept_more(iocp, lpfnAcceptEx, fd);
+			} else if (r->prev) {
+				DWORD rcvd;
+				if (GetOverlappedResult((HANDLE)r->fd, &r->ol,
+							&rcvd, FALSE)) {
+					r->sz += rcvd;
+					distribute_data(r);
+					read_more(r);
+				} else {
+					close_remote(r);
+				}
+			}
 		}
 
-		for (struct rxbuf *r = free_list; r != NULL;) {
-			struct rxbuf *n = r->next;
-			free(r);
-			r = n;
-		}
+		free_remotes();
 	}
-	perror("get queued completion status");
 	return 1;
 }
 #else
@@ -378,6 +404,7 @@ static void accept_more(int efd, int lfd)
 			.data.ptr = r,
 		};
 		epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev);
+		add_remote(r);
 		read_more(r);
 	}
 }
@@ -422,7 +449,7 @@ int main(int argc, char *argv[])
 			struct remote *r = ev[i].data.ptr;
 			if (!r) {
 				accept_more(efd, lfd);
-			} else if (r->fd >= 0) {
+			} else if (r->prev) {
 				read_more(r);
 			}
 		}

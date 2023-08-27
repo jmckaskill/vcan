@@ -62,7 +62,7 @@ struct can_frame {
 	uint8_t __pad; /* padding */
 	uint8_t __res0; /* reserved / padding */
 	uint8_t __res1; /* reserved / padding */
-	alignas(8) uint8_t data[CAN_MAX_DLEN];
+	uint8_t data[CAN_MAX_DLEN];
 };
 
 /*
@@ -99,7 +99,7 @@ struct canfd_frame {
 	uint8_t flags; /* additional flags for CAN FD */
 	uint8_t __res0; /* reserved / padding */
 	uint8_t __res1; /* reserved / padding */
-	alignas(8) uint8_t data[CANFD_MAX_DLEN];
+	uint8_t data[CANFD_MAX_DLEN];
 };
 
 #define CAN_MTU (sizeof(struct can_frame))

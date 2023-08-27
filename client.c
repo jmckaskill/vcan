@@ -3,8 +3,10 @@
 #include <string.h>
 
 #ifdef _WIN32
+#include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
 static inline void perror(const char *msg)
 {
 	char buf[256];
@@ -105,6 +107,11 @@ static int do_connect(int *pfd, int argc, char **argv)
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+
 	int fd;
 	if (do_connect(&fd, argc, argv)) {
 #ifndef _WIN32
@@ -122,7 +129,7 @@ int main(int argc, char *argv[])
 	f.data[1] = 2;
 	f.data[2] = 3;
 	f.data[3] = 4;
-	send(fd, &f, sizeof(f), 0);
+	send(fd, (char *)&f, sizeof(f), 0);
 
 	char buf[1024];
 	int off = 0;

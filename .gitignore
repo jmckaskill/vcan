@@ -1,5 +1,7 @@
 /client
-/client.exe
 /vcand
-/vcand.exe
 /.vscode
+*.obj
+*.exe
+*.pdb
+*.ilk
